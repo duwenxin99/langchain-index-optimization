@@ -47,6 +47,7 @@ async def get_vector_store():
 async def hnsw_search(vector_store):
     hnsw_index = HNSWIndex()
     await vector_store.aapply_vector_index(hnsw_index)
+    assert await vector_store.is_valid_index(hnsw_index.name)
     query = "Aromas include tropical fruit, broom, brimstone and dried herb."
     docs = await vector_store.asimilarity_search(query, k=10)
     await vector_store.adrop_vector_index(hnsw_index.name)
@@ -56,6 +57,7 @@ async def hnsw_search(vector_store):
 async def ivfflat_search(vector_store):
     ivfflat_index = IVFFlatIndex()
     await vector_store.aapply_vector_index(ivfflat_index)
+    assert await vector_store.is_valid_index(ivfflat_index.name)
     query = "Aromas include tropical fruit, broom, brimstone and dried herb."
     docs = await vector_store.asimilarity_search(query, k=10)
     await vector_store.adrop_vector_index(ivfflat_index.name)
