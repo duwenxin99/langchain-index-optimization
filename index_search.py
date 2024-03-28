@@ -1,24 +1,32 @@
 import asyncio
-from langchain_google_alloydb_pg import AlloyDBVectorStore
-from langchain_google_alloydb_pg.indexes import IVFFlatIndex
-from langchain_google_alloydb_pg.indexes import HNSWIndex
+import time
+
 from create_vector_embeddings import (
+    CLUSTER_NAME,
+    DATABASE_NAME,
+    INSTANCE_NAME,
+    PASSWORD,
     PROJECT_ID,
     REGION,
-    CLUSTER_NAME,
-    INSTANCE_NAME,
-    DATABASE_NAME,
     USER,
-    PASSWORD,
     vector_table_name,
 )
 from langchain_google_alloydb_pg import (
     AlloyDBEngine,
-    AlloyDBLoader,
     AlloyDBVectorStore,
     Column,
 )
+from langchain_google_alloydb_pg.indexes import (
+    HNSWIndex,
+    IVFFlatIndex,
+    DistanceStrategy,
+)
 from langchain_google_vertexai import VertexAIEmbeddings
+
+k = 10
+query_1 = "Brooding aromas of barrel spice"
+query_2 = "Aromas include tropical fruit, broom, brimstone and dried herb."
+query = query_1
 
 embedding = VertexAIEmbeddings(
     model_name="textembedding-gecko@latest", project=PROJECT_ID
@@ -45,29 +53,44 @@ async def get_vector_store():
 
 
 async def hnsw_search(vector_store):
-    hnsw_index = HNSWIndex()
+    # Distance strategy: EUCLIDEAN, COSINE_DISTANCE, INNER_PRODUCT
+    hnsw_index = HNSWIndex(
+        distance_strategy=DistanceStrategy.INNER_PRODUCT, m=99, ef_construction=200
+    )
     await vector_store.aapply_vector_index(hnsw_index)
     assert await vector_store.is_valid_index(hnsw_index.name)
-    query = "Aromas include tropical fruit, broom, brimstone and dried herb."
-    docs = await vector_store.asimilarity_search(query, k=10)
+
+    start = time.monotonic()  # timer starts
+    docs = await vector_store.asimilarity_search(query, k=k)
+    end = time.monotonic()  # timer ends
+
     await vector_store.adrop_vector_index(hnsw_index.name)
-    return docs
+    latency = round(end - start, 2)
+    return docs, latency
 
 
 async def ivfflat_search(vector_store):
-    ivfflat_index = IVFFlatIndex()
+    ivfflat_index = IVFFlatIndex(distance_strategy=DistanceStrategy.EUCLIDEAN)
     await vector_store.aapply_vector_index(ivfflat_index)
     assert await vector_store.is_valid_index(ivfflat_index.name)
-    query = "Aromas include tropical fruit, broom, brimstone and dried herb."
-    docs = await vector_store.asimilarity_search(query, k=10)
+
+    start = time.monotonic()  # timer starts
+    docs = await vector_store.asimilarity_search(query, k=k)
+    end = time.monotonic()  # timer ends
+
     await vector_store.adrop_vector_index(ivfflat_index.name)
-    return docs
+    latency = round(end - start, 2)
+    return docs, latency
 
 
 async def knn_search(vector_store):
-    query = "Aromas include tropical fruit, broom, brimstone and dried herb."
-    docs = await vector_store.asimilarity_search(query, k=10)
-    return docs
+
+    start = time.monotonic()  # timer starts
+    docs = await vector_store.asimilarity_search(query, k=k)
+    end = time.monotonic()  # timer ends
+
+    latency = round(end - start, 2)
+    return docs, latency
 
 
 def calculate_recall(base, target) -> float:
@@ -82,13 +105,15 @@ def calculate_recall(base, target) -> float:
 
 async def main():
     vector_store = await get_vector_store()
-    knn_docs = await knn_search(vector_store)
-    hnsw_docs = await hnsw_search(vector_store)
-    ivfflat_docs = await ivfflat_search(vector_store)
+    knn_docs, knn_latency = await knn_search(vector_store)
+    hnsw_docs, hnsw_latency = await hnsw_search(vector_store)
+    ivfflat_docs, ivfflat_latency = await ivfflat_search(vector_store)
     hnsw_recall = calculate_recall(knn_docs, hnsw_docs)
     ivfflat_recall = calculate_recall(knn_docs, ivfflat_docs)
-    print(f"HNSW recall: {hnsw_recall}")
-    print(f"IVFFLAT recall: {ivfflat_recall}")
+
+    print(f"KNN recall: 1.0            KNN latency: {knn_latency}")
+    print(f"HNSW recall: {hnsw_recall}          HNSW latency: {hnsw_latency}")
+    print(f"IVFFLAT recall: {ivfflat_recall}    IVFFLAT latency: {ivfflat_latency}")
 
 
 if __name__ == "__main__":

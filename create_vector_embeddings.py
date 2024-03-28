@@ -15,6 +15,8 @@ import sqlalchemy
 import numpy as np
 
 
+EMBEDDING_COUNT = 5000
+
 # AlloyDB info
 PROJECT_ID = "duwenxin-space"
 REGION = "us-central1"  # @param {type:"string"}
@@ -202,7 +204,7 @@ async def create_vector_store_table(documents):
         metadata_columns=dataset_columns,
     )
 
-    ids = [str(uuid.uuid4()) for i in range(100)]
+    ids = [str(uuid.uuid4()) for i in range(EMBEDDING_COUNT)]
     await vector_store.aadd_documents(documents, ids)
     print("Vector table created.")
 
