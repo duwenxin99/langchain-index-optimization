@@ -1,6 +1,7 @@
 import asyncio
 import time
 
+import numpy as np
 from create_vector_embeddings import (
     CLUSTER_NAME,
     DATABASE_NAME,
@@ -11,22 +12,26 @@ from create_vector_embeddings import (
     USER,
     vector_table_name,
 )
-from langchain_google_alloydb_pg import (
-    AlloyDBEngine,
-    AlloyDBVectorStore,
-    Column,
-)
+from langchain_google_alloydb_pg import AlloyDBEngine, AlloyDBVectorStore
 from langchain_google_alloydb_pg.indexes import (
-    HNSWIndex,
-    IVFFlatIndex,
     DistanceStrategy,
+    HNSWIndex,
+    HNSWQueryOptions,
+    IVFFlatIndex,
 )
 from langchain_google_vertexai import VertexAIEmbeddings
 
+DISTANCE_STRATEGY = DistanceStrategy.EUCLIDEAN
 k = 10
-query_1 = "Brooding aromas of barrel spice"
+query_1 = "Brooding aromas of barrel spice."
 query_2 = "Aromas include tropical fruit, broom, brimstone and dried herb."
-query = query_1
+query_3 = "Wine from spain."
+query_4 = "Condensed and dark on the bouquet"
+query_5 = (
+    "Light, fresh and silky—just what might be expected from cool-climate Pinot Noir"
+)
+queries = [query_1, query_2, query_3, query_4, query_5]
+
 
 embedding = VertexAIEmbeddings(
     model_name="textembedding-gecko@latest", project=PROJECT_ID
@@ -46,74 +51,101 @@ async def get_vector_store():
 
     vector_store = await AlloyDBVectorStore.create(
         engine=engine,
+        distance_strategy=DISTANCE_STRATEGY,
         table_name=vector_table_name,
         embedding_service=embedding,
+        index_query_options=HNSWQueryOptions(ef_search=256),
     )
     return vector_store
 
 
-async def hnsw_search(vector_store):
-    # Distance strategy: EUCLIDEAN, COSINE_DISTANCE, INNER_PRODUCT
+async def query_vector_with_timing(vector_store, query):
+    start_time = time.monotonic()  # timer starts
+    docs = await vector_store.asimilarity_search(k=k, query=query)
+    end_time = time.monotonic()  # timer ends
+    latency = end_time - start_time
+    return docs, latency
+
+
+async def hnsw_search(vector_store, knn_docs):
     hnsw_index = HNSWIndex(
-        distance_strategy=DistanceStrategy.INNER_PRODUCT, m=99, ef_construction=200
+        name="hnsw", distance_strategy=DISTANCE_STRATEGY, m=36, ef_construction=96
     )
+    # hnsw_index = HNSWIndex(name="hnsw", distance_strategy=DISTANCE_STRATEGY)
     await vector_store.aapply_vector_index(hnsw_index)
     assert await vector_store.is_valid_index(hnsw_index.name)
+    print("HNSW index created.")
+    latencies = []
+    recalls = []
 
-    start = time.monotonic()  # timer starts
-    docs = await vector_store.asimilarity_search(query, k=k)
-    end = time.monotonic()  # timer ends
+    for i in range(len(queries)):
+        hnsw_docs, latency = await query_vector_with_timing(vector_store, queries[i])
+        latencies.append(latency)
+        recalls.append(calculate_recall(knn_docs[i], hnsw_docs))
+    print(recalls)
 
     await vector_store.adrop_vector_index(hnsw_index.name)
-    latency = round(end - start, 2)
-    return docs, latency
+    # calculate average recall & latency
+    average_latency = sum(latencies) / len(latencies)
+    average_recall = sum(recalls) / len(recalls)
+    return average_latency, average_recall
 
 
-async def ivfflat_search(vector_store):
-    ivfflat_index = IVFFlatIndex(distance_strategy=DistanceStrategy.EUCLIDEAN)
+async def ivfflat_search(vector_store, knn_docs):
+    ivfflat_index = IVFFlatIndex(name="ivfflat", distance_strategy=DISTANCE_STRATEGY)
     await vector_store.aapply_vector_index(ivfflat_index)
     assert await vector_store.is_valid_index(ivfflat_index.name)
+    print("IVFFLAT index created.")
+    latencies = []
+    recalls = []
 
-    start = time.monotonic()  # timer starts
-    docs = await vector_store.asimilarity_search(query, k=k)
-    end = time.monotonic()  # timer ends
+    for i in range(len(queries)):
+        ivfflat_docs, latency = await query_vector_with_timing(vector_store, queries[i])
+        latencies.append(latency)
+        recalls.append(calculate_recall(knn_docs[i], ivfflat_docs))
 
     await vector_store.adrop_vector_index(ivfflat_index.name)
-    latency = round(end - start, 2)
-    return docs, latency
+    # calculate average recall & latency
+    average_latency = sum(latencies) / len(latencies)
+    average_recall = sum(recalls) / len(recalls)
+    return average_latency, average_recall
 
 
 async def knn_search(vector_store):
-
-    start = time.monotonic()  # timer starts
-    docs = await vector_store.asimilarity_search(query, k=k)
-    end = time.monotonic()  # timer ends
-
-    latency = round(end - start, 2)
-    return docs, latency
+    latencies = []
+    knn_docs = []
+    for query in queries:
+        docs, latency = await query_vector_with_timing(vector_store, query)
+        latencies.append(latency)
+        knn_docs.append(docs)
+    average_latency = sum(latencies) / len(latencies)
+    return knn_docs, average_latency
 
 
 def calculate_recall(base, target) -> float:
     # size of intersection / total number of times
-    match = 0
-    total = len(base)
-    for i in range(total):
-        if base[i].metadata["id"] == target[i].metadata["id"]:
-            match = match + 1
-    return match / total
+    base = {doc.metadata["id"] for doc in base}
+    target = {doc.metadata["id"] for doc in target}
+    return len(base & target) / len(base)
 
 
 async def main():
     vector_store = await get_vector_store()
     knn_docs, knn_latency = await knn_search(vector_store)
-    hnsw_docs, hnsw_latency = await hnsw_search(vector_store)
-    ivfflat_docs, ivfflat_latency = await ivfflat_search(vector_store)
-    hnsw_recall = calculate_recall(knn_docs, hnsw_docs)
-    ivfflat_recall = calculate_recall(knn_docs, ivfflat_docs)
+    hnsw_average_latency, hnsw_average_recall = await hnsw_search(
+        vector_store, knn_docs
+    )
+    ivfflat_average_latency, ivfflat_average_recall = await ivfflat_search(
+        vector_store, knn_docs
+    )
 
     print(f"KNN recall: 1.0            KNN latency: {knn_latency}")
-    print(f"HNSW recall: {hnsw_recall}          HNSW latency: {hnsw_latency}")
-    print(f"IVFFLAT recall: {ivfflat_recall}    IVFFLAT latency: {ivfflat_latency}")
+    print(
+        f"HNSW average recall: {hnsw_average_recall}          HNSW average latency: {hnsw_average_latency}"
+    )
+    print(
+        f"IVFFLAT average recall: {ivfflat_average_recall}    IVFFLAT latency: {ivfflat_average_latency}"
+    )
 
 
 if __name__ == "__main__":

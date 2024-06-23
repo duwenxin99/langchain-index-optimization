@@ -1,21 +1,14 @@
 import asyncio
-import asyncpg
+import uuid
+
 from google.cloud.alloydb.connector import AsyncConnector, IPTypes
-from langchain_google_alloydb_pg import (
-    AlloyDBEngine,
-    AlloyDBLoader,
-    AlloyDBVectorStore,
-    Column,
-)
+from langchain.docstore.document import Document
+from langchain_community.document_loaders import CSVLoader
+from langchain_google_alloydb_pg import AlloyDBEngine, AlloyDBVectorStore, Column
 from langchain_google_vertexai import VertexAIEmbeddings
 from sqlalchemy.ext.asyncio import create_async_engine
-import pandas as pd
-import uuid
-import sqlalchemy
-import numpy as np
 
-
-EMBEDDING_COUNT = 5000
+EMBEDDING_COUNT = 100
 
 # AlloyDB info
 PROJECT_ID = "duwenxin-space"
@@ -26,11 +19,10 @@ DATABASE_NAME = "netflix"  # @param {type:"string"}
 USER = "postgres"  # @param {type:"string"}
 PASSWORD = "postgres"  # @param {type:"string"}
 
-source_table_name = "wines"
-vector_table_name = "wines_vector"
+vector_table_name = "wine_reviews_vector"
 
 # Dataset
-dataset_path = "wine_reviews_dataset.csv"
+DATASET_PATH = "wine_reviews_dataset.csv"
 dataset_columns = [
     "country",
     "description",
@@ -50,7 +42,6 @@ dataset_columns = [
 connection_string = f"projects/{PROJECT_ID}/locations/{REGION}/clusters/{CLUSTER_NAME}/instances/{INSTANCE_NAME}"
 # initialize Connector object
 connector = AsyncConnector()
-engine = None
 
 
 async def getconn():
@@ -72,81 +63,21 @@ pool = create_async_engine(
 )
 
 
-async def import_data_to_alloydb():
-    df = pd.read_csv(dataset_path)
+async def load_csv_documents(dataset_path=DATASET_PATH):
+    """Loads documents directly from a CSV file using LangChain."""
 
-    delete_table_cmd = sqlalchemy.text(f"""DROP TABLE IF EXISTS {source_table_name};""")
+    loader = CSVLoader(file_path=dataset_path)
+    documents = loader.load()
 
-    create_table_cmd = sqlalchemy.text(
-        f"""CREATE TABLE {source_table_name} (
-            id SERIAL PRIMARY KEY,
-            country VARCHAR(100),
-            description TEXT,
-            designation VARCHAR(255),
-            points INT,
-            price NUMERIC(10, 2),
-            province VARCHAR(100),
-            region_1 VARCHAR(100),
-            region_2 VARCHAR(100),
-            taster_name VARCHAR(100),
-            taster_twitter_handle VARCHAR(100),
-            title TEXT,
-            variety VARCHAR(100),
-            winery VARCHAR(100)
-        );"""
-    )
-
-    insert_data_cmd = sqlalchemy.text(
-        f"""
-        INSERT INTO {source_table_name} VALUES (:id, :country, :description, :designation,
-            :points, :price, :province, :region_1, :region_2, :taster_name,
-            :taster_twitter_handle, :title, :variety, :winery)
-        """
-    )
-
-    parameter_map = [
-        {
-            "id": index,
-            "country": row["country"] if not pd.isna(row["country"]) else None,
-            "description": (
-                row["description"] if not pd.isna(row["description"]) else None
-            ),
-            "designation": (
-                row["designation"] if not pd.isna(row["designation"]) else None
-            ),
-            "points": row["points"] if not pd.isna(row["points"]) else None,
-            "price": row["price"] if not pd.isna(row["price"]) else None,
-            "province": row["province"] if not pd.isna(row["province"]) else None,
-            "region_1": row["region_1"] if not pd.isna(row["region_1"]) else None,
-            "region_2": row["region_2"] if not pd.isna(row["region_2"]) else None,
-            "taster_name": (
-                row["taster_name"] if not pd.isna(row["taster_name"]) else None
-            ),
-            "taster_twitter_handle": (
-                row["taster_twitter_handle"]
-                if not pd.isna(row["taster_twitter_handle"])
-                else None
-            ),
-            "title": row["title"] if not pd.isna(row["title"]) else None,
-            "variety": row["variety"] if not pd.isna(row["variety"]) else None,
-            "winery": row["winery"] if not pd.isna(row["winery"]) else None,
-        }
-        for index, row in df.iterrows()
+    documents = [
+        Document(page_content=str(doc.dict()), metadata=doc.metadata)
+        for doc in documents
     ]
 
-    async with pool.connect() as db_conn:
-        await db_conn.execute(delete_table_cmd)
-        await db_conn.execute(create_table_cmd)
-        await db_conn.execute(
-            insert_data_cmd,
-            parameter_map,
-        )
-        await db_conn.commit()
-    await connector.close()
+    return documents
 
 
-async def load_alloydb_documents():
-    global engine
+async def create_vector_store_table(documents):
     engine = await AlloyDBEngine.afrom_instance(
         project_id=PROJECT_ID,
         region=REGION,
@@ -157,19 +88,6 @@ async def load_alloydb_documents():
         password=PASSWORD,
     )
     print("Successfully connected to AlloyDB database.")
-
-    loader = await AlloyDBLoader.create(
-        engine=engine,
-        query=f"SELECT * FROM {source_table_name};",
-        content_columns=dataset_columns,
-    )
-
-    documents = await loader.aload()
-    print("Documents loaded.")
-    return documents
-
-
-async def create_vector_store_table(documents):
     print("Initializaing Vectorstore tables...")
     await engine.ainit_vectorstore_table(
         table_name=vector_table_name,
@@ -210,8 +128,7 @@ async def create_vector_store_table(documents):
 
 
 async def main():
-    await import_data_to_alloydb()
-    documents = await load_alloydb_documents()
+    documents = await load_csv_documents()
     await create_vector_store_table(documents)
 
 
